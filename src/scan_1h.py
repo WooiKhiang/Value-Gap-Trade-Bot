@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 from .data_yf import download_batched
-from .strategy_valuegap import scan_candidate_1h
+from .strategy import scan_candidate_1h
 
 CAND_HEADERS = [
     "timestamp_utc",
