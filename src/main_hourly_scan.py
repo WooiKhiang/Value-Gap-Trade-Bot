@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from datetime import datetime, timezone
 import pandas as pd
 
 from .config import Config
@@ -6,6 +8,15 @@ from .logger import get_logger
 from .universe import load_static_universe
 from .scan_1h import run_hourly_scan, CAND_HEADERS
 from .sheets import open_sheet, ensure_worksheet, clear_and_write, append_rows
+
+
+def utc_iso_z() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def main():
@@ -31,10 +42,11 @@ def main():
     cand_df = run_hourly_scan(tickers, cfg, logger)
     clear_and_write(ws_candidates, CAND_HEADERS, cand_df)
 
+    # Always write a clean standardized timestamp to Logs
     append_rows(
         ws_logs,
         [[
-            (cand_df["timestamp_utc"].iloc[0] if not cand_df.empty else ""),
+            utc_iso_z(),
             "hourly_scan",
             "INFO",
             f"Universe={len(tickers)} Candidates={len(cand_df)}",
