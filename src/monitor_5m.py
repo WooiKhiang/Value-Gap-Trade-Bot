@@ -4,6 +4,8 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+from typing import Dict, Any
+
 import pandas as pd
 
 from .config import Config
@@ -35,43 +37,57 @@ def _utcnow_iso() -> str:
     return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
 
 
-def _load_fired_cache() -> dict:
+def _load_fired_cache() -> Dict[str, Any]:
     os.makedirs(CACHE_DIR, exist_ok=True)
     if not os.path.exists(FIRED_CACHE_FILE):
         return {"fired": []}
     try:
         with open(FIRED_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"fired": []}
+        if "fired" not in data or not isinstance(data["fired"], list):
+            data["fired"] = []
+        return data
     except Exception:
         return {"fired": []}
 
 
-def _save_fired_cache(cache: dict) -> None:
+def _save_fired_cache(cache: Dict[str, Any]) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
     with open(FIRED_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
-def _is_duplicate(symbol: str, ref_time: str, cache: dict) -> bool:
-    key = f"{symbol}__{ref_time}"
-    return key in set(cache.get("fired", []))
+def _dup_key(symbol: str, ref_time: str) -> str:
+    return f"{symbol}__{ref_time}"
 
 
-def _mark_fired(symbol: str, ref_time: str, cache: dict) -> None:
-    key = f"{symbol}__{ref_time}"
+def _is_duplicate(symbol: str, ref_time: str, cache: Dict[str, Any]) -> bool:
+    fired = set(cache.get("fired", []))
+    return _dup_key(symbol, ref_time) in fired
+
+
+def _mark_fired(symbol: str, ref_time: str, cache: Dict[str, Any]) -> None:
+    key = _dup_key(symbol, ref_time)
     fired = cache.get("fired", [])
     if key not in fired:
         fired.append(key)
-    # keep cache from growing forever
-    cache["fired"] = fired[-2000:]
+    cache["fired"] = fired[-3000:]  # cap growth
 
 
-def _parse_iso(dt_str: str) -> datetime | None:
+def _parse_iso(dt_str: str):
     if not dt_str:
         return None
     try:
-        # Example: 2026-01-10T12:34:56.123456
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        # tolerate trailing Z
+        s = str(dt_str).replace("Z", "+00:00")
+        # fromisoformat handles "2026-01-11T10:00:00+00:00"
+        d = datetime.fromisoformat(s)
+        # make naive UTC for comparisons
+        if d.tzinfo is not None:
+            d = d.astimezone(timezone.utc).replace(tzinfo=None)
+        return d
     except Exception:
         return None
 
@@ -87,22 +103,20 @@ def _clean_candidates(df: pd.DataFrame, logger) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    # Normalize col names we expect
     required = ["symbol", "ref_time", "ref_low", "atr", "expires_utc", "status"]
     for c in required:
         if c not in df.columns:
             logger.warning(f"Candidates sheet missing column: {c}")
             return pd.DataFrame()
 
-    # Trim and normalize
     df = df.copy()
     df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
     df["status"] = df["status"].astype(str).str.upper().str.strip()
 
-    # Filter ACTIVE
+    # active only
     df = df[df["status"] == "ACTIVE"]
 
-    # Filter not expired
+    # not expired
     now = datetime.utcnow()
     def not_expired(row) -> bool:
         exp = _parse_iso(str(row.get("expires_utc", "")))
@@ -112,22 +126,16 @@ def _clean_candidates(df: pd.DataFrame, logger) -> pd.DataFrame:
 
     df = df[df.apply(not_expired, axis=1)]
 
-    # Keep only needed columns
+    # keep only what we need and de-dup
     return df[required].drop_duplicates(subset=["symbol", "ref_time"])
 
 
 def run_once(cfg: Config, logger) -> int:
-    """
-    One monitoring tick:
-    - read candidates
-    - pull 5m bars for active tickers
-    - confirm signals
-    - append signals to sheet
-    """
     if not cfg.gsheet_id:
         raise RuntimeError("GSHEET_ID missing in env/.env")
 
     ss = open_sheet(cfg.gsheet_id, cfg.google_service_account_json)
+
     ws_candidates = ensure_worksheet(ss, "Candidates", [])
     ws_signals = ensure_worksheet(ss, "Signals", SIGNAL_HEADERS)
     ws_logs = ensure_worksheet(ss, "Logs", ["timestamp_utc", "component", "level", "message"])
@@ -136,25 +144,27 @@ def run_once(cfg: Config, logger) -> int:
     cand_df = _clean_candidates(cand_df, logger)
 
     if cand_df.empty:
-        logger.info("No ACTIVE, non-expired candidates. Nothing to monitor.")
-        ws_logs.append_rows([[_utcnow_iso(), "monitor_5m", "INFO", "No active candidates"]])
+        msg = "No ACTIVE, non-expired candidates."
+        logger.info(msg)
+        ws_logs.append_rows([[_utcnow_iso(), "monitor_5m", "INFO", msg]])
         return 0
-
-    # Duplicate protection cache (local)
-    cache = _load_fired_cache()
 
     tickers = cand_df["symbol"].tolist()
     logger.info(f"Monitoring 5m confirmations for {len(tickers)} tickers.")
 
-    # Download 5m data (short period to reduce load)
+    # Load duplicate protection cache (local json)
+    cache = _load_fired_cache()
+
+    # Download 5m bars (NO SQLITE CACHE)
     data_5m = download_batched(
         tickers=tickers,
         interval="5m",
         period="5d",
-        batch_size=min(cfg.yf_batch_size, 50),
-        sleep_sec=cfg.yf_sleep_between_batch_sec,
+        batch_size=min(getattr(cfg, "yf_batch_size", 50), 50),
+        sleep_sec=float(getattr(cfg, "yf_sleep_between_batch_sec", 2)),
         logger=logger,
         cache_key_prefix="yf5m",
+        use_cache=False,   # IMPORTANT: avoid any DB cache behavior
     )
 
     signal_rows = []
@@ -163,6 +173,7 @@ def run_once(cfg: Config, logger) -> int:
     for _, row in cand_df.iterrows():
         sym = row["symbol"]
         ref_time = str(row["ref_time"])
+
         if _is_duplicate(sym, ref_time, cache):
             continue
 
@@ -172,21 +183,20 @@ def run_once(cfg: Config, logger) -> int:
 
         ref_low = _safe_float(row["ref_low"])
         atr_val = _safe_float(row["atr"])
-        if atr_val <= 0 or ref_low <= 0:
+        if ref_low <= 0 or atr_val <= 0:
             continue
 
         result = check_touch_and_confirm_5m(
             df_5m=df5,
             ref_low=ref_low,
             atr_val=atr_val,
-            touch_buffer_atr_mult=cfg.touch_buffer_atr_mult,
-            confirm_break_buffer_atr_mult=cfg.confirm_break_buffer_atr_mult,
+            touch_buffer_atr_mult=float(getattr(cfg, "touch_buffer_atr_mult", 0.10)),
+            confirm_break_buffer_atr_mult=float(getattr(cfg, "confirm_break_buffer_atr_mult", 0.05)),
         )
 
         if not result:
             continue
 
-        # Mark fired (local cache)
         _mark_fired(sym, ref_time, cache)
         fired_now += 1
 
@@ -201,10 +211,9 @@ def run_once(cfg: Config, logger) -> int:
             "rejection_high": result.get("rejection_high", ""),
             "confirm_time": result.get("confirm_time", ""),
             "confirm_close": result.get("confirm_close", ""),
-            "note": "5m confirm: touch+rejection then confirm close above rejection high",
+            "note": "5m confirm: touch + rejection then close above rejection high",
         })
 
-    # Persist cache
     _save_fired_cache(cache)
 
     if signal_rows:
@@ -223,7 +232,7 @@ def run_once(cfg: Config, logger) -> int:
 
 def loop_forever(poll_seconds: int = 60):
     cfg = Config()
-    logger = get_logger("monitor_5m", cfg.log_level)
+    logger = get_logger("monitor_5m", getattr(cfg, "log_level", "INFO"))
 
     logger.info("Starting monitor_5m loop...")
     while True:
@@ -231,4 +240,4 @@ def loop_forever(poll_seconds: int = 60):
             run_once(cfg, logger)
         except Exception as e:
             logger.exception(f"monitor_5m tick failed: {e}")
-        time.sleep(poll_seconds)
+        time.sleep(int(poll_seconds))
