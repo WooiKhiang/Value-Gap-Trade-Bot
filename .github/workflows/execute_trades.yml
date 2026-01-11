@@ -1,0 +1,44 @@
+name: Execute Trades (Paper)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "*/10 * * * *"  # every 10 minutes (you can change later)
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write Google service account json
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}' > service_account.json
+
+      - name: Execute selected trades (paper)
+        env:
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ./service_account.json
+
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ALPACA_PAPER: "true"
+          # Optional:
+          # ALPACA_BASE_URL: "https://paper-api.alpaca.markets"
+
+          # Safety cap
+          MAX_EXEC_ORDERS: "5"
+
+          LOG_LEVEL: "INFO"
+        run: |
+          python -m src.execute_trades
