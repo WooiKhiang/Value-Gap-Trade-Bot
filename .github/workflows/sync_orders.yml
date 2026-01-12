@@ -1,0 +1,42 @@
+name: Sync Alpaca Orders (5m)
+
+on:
+  schedule:
+    - cron: "*/5 * * * 1-5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: value-gap-bot
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Write Google service account json
+        run: |
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT }}' > service_account.json
+
+      - name: Sync orders
+        env:
+          GSHEET_ID: ${{ secrets.GSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ./service_account.json
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ALPACA_PAPER: "true"
+          ALPACA_SYNC_LIMIT: "200"
+          LOG_LEVEL: "INFO"
+        run: |
+          python -m src.alpaca_sync_orders
