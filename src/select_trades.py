@@ -200,6 +200,9 @@ def select_trades():
 
     control = _read_control_kv(ss)
     k = _knobs(cfg, control)
+    regime = _read_latest_market_regime(ss)
+    k = _apply_regime_overlay(k, control, regime)
+    ws_logs.append_rows([[utc_iso_z(), "select_trades", "INFO", f"Regime overlay applied: {regime}"]])
 
     # Pull latest Alpaca cash from Capital tab (synced by sync_alpaca_state.py)
     alpaca_cash = _read_latest_alpaca_cash(ss, logger)
