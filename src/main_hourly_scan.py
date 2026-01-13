@@ -5,16 +5,10 @@ import pandas as pd
 from .config import Config
 from .logger import get_logger
 from .scan_1h import run_hourly_scan, CAND_HEADERS
-from .sheets import (
-    open_sheet,
-    ensure_worksheet,
-    clear_and_write,
-    append_rows,
-    read_worksheet_df,
-)
+from .sheets import open_sheet, ensure_worksheet, clear_and_write, append_rows, read_worksheet_df
 
 
-def main() -> None:
+def main():
     cfg = Config()
     logger = get_logger("hourly_scan", cfg.log_level)
 
@@ -25,9 +19,9 @@ def main() -> None:
 
     # Universe is INPUT (do not overwrite it)
     ws_universe = ensure_worksheet(ss, "Universe", ["symbol"])
+    ws_candidates = ensure_worksheet(ss, "Candidates", CAND_HEADERS)
     ws_logs = ensure_worksheet(ss, "Logs", ["timestamp_utc", "component", "level", "message"])
 
-    # Read Universe tab
     u_df = read_worksheet_df(ws_universe)
     if u_df is None or u_df.empty or "symbol" not in u_df.columns:
         raise RuntimeError("Universe tab is empty or missing 'symbol' column")
@@ -37,31 +31,29 @@ def main() -> None:
         .astype(str)
         .str.upper()
         .str.strip()
-    ).tolist()
-
-    tickers = [t for t in tickers if t and t != "NAN"]
+    )
+    tickers = [t for t in tickers.tolist() if t and t != "NAN"]
     tickers = list(dict.fromkeys(tickers))  # de-dup keep order
 
-    # Optional cap from env (MAX_UNIVERSE_TICKERS)
+    # optional cap
+    cap = 0
     try:
         cap = int(getattr(cfg, "max_universe_tickers", 0) or 0)
-        if cap > 0:
-            tickers = tickers[:cap]
     except Exception:
-        pass
+        cap = 0
+    if cap > 0:
+        tickers = tickers[:cap]
 
     logger.info(f"Hourly scan start. Universe size={len(tickers)} interval=1h")
 
     cand_df = run_hourly_scan(tickers, cfg, logger)
 
-    # Always (re)create Candidates worksheet then overwrite
-    ws_candidates = ensure_worksheet(ss, "Candidates", CAND_HEADERS)
+    # overwrite candidates each run (clean)
     clear_and_write(ws_candidates, CAND_HEADERS, cand_df)
 
-    # Log row
     ts = ""
     if cand_df is not None and not cand_df.empty and "timestamp_utc" in cand_df.columns:
-        ts = str(cand_df["timestamp_utc"].iloc[0] or "")
+        ts = str(cand_df["timestamp_utc"].iloc[0])
 
     append_rows(
         ws_logs,
