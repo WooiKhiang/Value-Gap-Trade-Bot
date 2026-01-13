@@ -7,8 +7,7 @@ from .config import Config
 from .logger import get_logger
 from .universe import load_static_universe
 from .scan_1h import run_hourly_scan, CAND_HEADERS
-from .sheets import open_sheet, ensure_worksheet, clear_and_write, append_rows
-
+from .sheets import open_sheet, ensure_worksheet, clear_and_write, append_rows, read_worksheet_df
 
 def utc_iso_z() -> str:
     return (
@@ -17,7 +16,6 @@ def utc_iso_z() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
-
 
 def main():
     cfg = Config()
