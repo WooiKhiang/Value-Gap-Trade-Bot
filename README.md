@@ -1,1 +1,2 @@
-# Value-Gap-Trade-Bot
+# Multi-Strategy-Trade-Bot
+
